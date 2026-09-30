@@ -125,11 +125,14 @@ export default function Index() {
       Alert.alert('Permission Denied', 'Bluetooth & Location required.'); return;
     }
     setDevices([]); setIsScanning(true);
-    manager.startDeviceScan([SERVICE_UUID], null, (err, device) => {
+    // scan ALL nearby BLE devices (no UUID filter) so user can pick any device
+    manager.startDeviceScan(null, { allowDuplicates: false }, (err, device) => {
       if (err) { setIsScanning(false); Alert.alert('Scan Error', err.message); return; }
-      if (device) setDevices(p => p.some(d => d.id === device.id) ? p : [...p, device]);
+      if (device && (device.name || device.localName)) {
+        setDevices(p => p.some(d => d.id === device.id) ? p : [...p, device]);
+      }
     });
-    setTimeout(() => { manager.stopDeviceScan(); setIsScanning(false); }, 10000);
+    setTimeout(() => { manager.stopDeviceScan(); setIsScanning(false); }, 15000);
   };
 
   const connectToDevice = async (device: Device) => {
@@ -284,7 +287,7 @@ export default function Index() {
                         <View style={[s.bar, s.bar1]} /><View style={[s.bar, s.bar2]} /><View style={[s.bar, s.bar3]} />
                       </View>
                       <View style={{ flex: 1 }}>
-                        <Text style={s.devName}>{dev.name || 'Unknown Device'}</Text>
+                        <Text style={s.devName}>{dev.name || dev.localName || 'Unknown Device'}</Text>
                         <Text style={s.devId}>{dev.id}</Text>
                       </View>
                       <Text style={s.devArrow}>⟩</Text>
