@@ -4,6 +4,7 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  Easing,
   PermissionsAndroid,
   Platform,
   ScrollView,
@@ -16,490 +17,396 @@ import {
 import { BleManager, Device, State } from 'react-native-ble-plx';
 
 const manager = new BleManager();
-
 const SERVICE_UUID = 'aee04821-1973-4e1f-a590-e84b10d580e7';
-const CHAR_UUID = 'cde07b1a-889b-44b7-a99f-c888dddac729';
+const CHAR_UUID    = 'cde07b1a-889b-44b7-a99f-c888dddac729';
 
 type Step = 1 | 2 | 3 | 4;
 
-const STEP_LABELS: Record<Step, string> = {
-  1: 'Scan & Connect',
-  2: 'Read Initial Data',
-  3: 'Send Names',
-  4: 'Grade Prediction',
+// ─── palette ───────────────────────────────────────────────
+const C = {
+  bg:        '#04000F',
+  surface:   '#0A0520',
+  border:    '#1D0D40',
+  neon:      '#BF5FFF',   // electric violet
+  neonDim:   '#7B2FBE',
+  neonGlow:  '#D89EFF',
+  magenta:   '#FF2CDF',
+  indigo:    '#4F35E8',
+  white:     '#F0E6FF',
+  muted:     '#5A4878',
+  textMuted: '#7A5FA0',
+  green:     '#1AFFD5',
+  red:       '#FF3366',
 };
 
 export default function Index() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
   const [isScanning, setIsScanning] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [step, setStep] = useState<Step>(1);
+  const [isLoading, setIsLoading]   = useState(false);
+  const [step, setStep]             = useState<Step>(1);
   const [initialValue, setInitialValue] = useState('');
-  const [myName, setMyName] = useState('');
-  const [buddyName, setBuddyName] = useState('');
+  const [myName, setMyName]         = useState('');
+  const [buddyName, setBuddyName]   = useState('');
   const [gradeResult, setGradeResult] = useState('');
 
-  // Pulse animation for scanning dot
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  const glowAnim = useRef(new Animated.Value(0)).current;
+  // animations
+  const scanRing  = useRef(new Animated.Value(0)).current;
+  const gradePop  = useRef(new Animated.Value(0)).current;
+  const gradeGlow = useRef(new Animated.Value(0)).current;
+  const headerBob = useRef(new Animated.Value(0)).current;
+
+  // gentle bobbing for header icon
+  useEffect(() => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(headerBob, { toValue: -8, duration: 1800, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+        Animated.timing(headerBob, { toValue:  0, duration: 1800, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
+      ])
+    ).start();
+  }, []);
 
   useEffect(() => {
     if (isScanning) {
       Animated.loop(
-        Animated.sequence([
-          Animated.timing(pulseAnim, { toValue: 1.4, duration: 700, useNativeDriver: true }),
-          Animated.timing(pulseAnim, { toValue: 1, duration: 700, useNativeDriver: true }),
-        ])
+        Animated.timing(scanRing, { toValue: 1, duration: 1400, easing: Easing.out(Easing.quad), useNativeDriver: true })
       ).start();
     } else {
-      pulseAnim.setValue(1);
+      scanRing.setValue(0);
     }
   }, [isScanning]);
 
   useEffect(() => {
     if (gradeResult) {
+      Animated.spring(gradePop, { toValue: 1, tension: 60, friction: 6, useNativeDriver: true }).start();
       Animated.loop(
         Animated.sequence([
-          Animated.timing(glowAnim, { toValue: 1, duration: 1200, useNativeDriver: true }),
-          Animated.timing(glowAnim, { toValue: 0, duration: 1200, useNativeDriver: true }),
+          Animated.timing(gradeGlow, { toValue: 1, duration: 900, useNativeDriver: true }),
+          Animated.timing(gradeGlow, { toValue: 0.4, duration: 900, useNativeDriver: true }),
         ])
       ).start();
     } else {
-      glowAnim.setValue(0);
+      gradePop.setValue(0);
+      gradeGlow.setValue(0);
     }
   }, [gradeResult]);
 
   useEffect(() => {
-    return () => {
-      manager.stopDeviceScan();
-      manager.destroy();
-    };
+    return () => { manager.stopDeviceScan(); manager.destroy(); };
   }, []);
 
+  // ── permissions ──────────────────────────────────────────
   async function requestPermissions() {
     if (Platform.OS === 'android') {
       if (Platform.Version >= 31) {
-        const granted = await PermissionsAndroid.requestMultiple([
+        const g = await PermissionsAndroid.requestMultiple([
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
           PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
         ]);
         return (
-          granted['android.permission.BLUETOOTH_SCAN'] === PermissionsAndroid.RESULTS.GRANTED &&
-          granted['android.permission.BLUETOOTH_CONNECT'] === PermissionsAndroid.RESULTS.GRANTED &&
-          granted['android.permission.ACCESS_FINE_LOCATION'] === PermissionsAndroid.RESULTS.GRANTED
+          g['android.permission.BLUETOOTH_SCAN']    === PermissionsAndroid.RESULTS.GRANTED &&
+          g['android.permission.BLUETOOTH_CONNECT'] === PermissionsAndroid.RESULTS.GRANTED &&
+          g['android.permission.ACCESS_FINE_LOCATION'] === PermissionsAndroid.RESULTS.GRANTED
         );
-      } else {
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
-        );
-        return granted === PermissionsAndroid.RESULTS.GRANTED;
       }
+      const g = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
+      return g === PermissionsAndroid.RESULTS.GRANTED;
     }
     return true;
   }
 
-  // ──────────────────────────────────────────────────────
-  // Step 1 – Scan & Connect
-  // ──────────────────────────────────────────────────────
+  // ── Step 1 ───────────────────────────────────────────────
   const startScan = async () => {
-    const btState = await manager.state();
-    if (btState !== State.PoweredOn) {
-      Alert.alert('⚠️ Bluetooth Off', 'Please turn on Bluetooth and try again.');
-      return;
+    if ((await manager.state()) !== State.PoweredOn) {
+      Alert.alert('Bluetooth Off', 'Please enable Bluetooth first.'); return;
     }
-    const permGranted = await requestPermissions();
-    if (!permGranted) {
-      Alert.alert('⚠️ Permission Denied', 'Bluetooth & Location permissions are required.');
-      return;
+    if (!(await requestPermissions())) {
+      Alert.alert('Permission Denied', 'Bluetooth & Location required.'); return;
     }
-
-    setDevices([]);
-    setIsScanning(true);
-
-    manager.startDeviceScan([SERVICE_UUID], null, (error, device) => {
-      if (error) {
-        setIsScanning(false);
-        Alert.alert('Scan Error', error.message);
-        return;
-      }
-      if (device) {
-        setDevices((prev) => {
-          if (prev.some((d) => d.id === device.id)) return prev;
-          return [...prev, device];
-        });
-      }
+    setDevices([]); setIsScanning(true);
+    manager.startDeviceScan([SERVICE_UUID], null, (err, device) => {
+      if (err) { setIsScanning(false); Alert.alert('Scan Error', err.message); return; }
+      if (device) setDevices(p => p.some(d => d.id === device.id) ? p : [...p, device]);
     });
-
-    setTimeout(() => {
-      manager.stopDeviceScan();
-      setIsScanning(false);
-    }, 10000);
+    setTimeout(() => { manager.stopDeviceScan(); setIsScanning(false); }, 10000);
   };
 
   const connectToDevice = async (device: Device) => {
-    manager.stopDeviceScan();
-    setIsScanning(false);
-    setIsLoading(true);
+    manager.stopDeviceScan(); setIsScanning(false); setIsLoading(true);
     try {
-      const connected = await manager.connectToDevice(device.id);
-      const discovered = await connected.discoverAllServicesAndCharacteristics();
-      setConnectedDevice(discovered);
-      setStep(2);
-    } catch (error: any) {
-      Alert.alert('Connection Failed', error?.message || 'Please try again.');
-    } finally {
-      setIsLoading(false);
-    }
+      const c = await manager.connectToDevice(device.id);
+      const d = await c.discoverAllServicesAndCharacteristics();
+      setConnectedDevice(d); setStep(2);
+    } catch (e: any) { Alert.alert('Connect Failed', e?.message); }
+    finally { setIsLoading(false); }
   };
 
-  // ──────────────────────────────────────────────────────
-  // Step 2 – Read Initial Value
-  // ──────────────────────────────────────────────────────
+  // ── Step 2 ───────────────────────────────────────────────
   const readInitialValue = async () => {
-    if (!connectedDevice) return;
-    setIsLoading(true);
+    if (!connectedDevice) return; setIsLoading(true);
     try {
-      const characteristic = await manager.readCharacteristicForDevice(
-        connectedDevice.id,
-        SERVICE_UUID,
-        CHAR_UUID
-      );
-      const raw = Buffer.from(characteristic.value || '', 'base64').toString('utf-8');
-      setInitialValue(raw);
+      const ch = await manager.readCharacteristicForDevice(connectedDevice.id, SERVICE_UUID, CHAR_UUID);
+      setInitialValue(Buffer.from(ch.value || '', 'base64').toString('utf-8'));
       setStep(3);
-    } catch (error: any) {
-      Alert.alert('Read Failed', error?.message || 'Failed to read data from device.');
-    } finally {
-      setIsLoading(false);
-    }
+    } catch (e: any) { Alert.alert('Read Failed', e?.message); }
+    finally { setIsLoading(false); }
   };
 
-  // ──────────────────────────────────────────────────────
-  // Step 3 – Send Names
-  // ──────────────────────────────────────────────────────
+  // ── Step 3 ───────────────────────────────────────────────
   const sendNames = async () => {
     if (!connectedDevice) return;
     if (!myName.trim() || !buddyName.trim()) {
-      Alert.alert('⚠️ Missing Info', 'Please enter both your name and your buddy\'s name.');
-      return;
+      Alert.alert('Missing Info', 'Enter both names.'); return;
     }
     setIsLoading(true);
     try {
       const payload = `${myName.trim()}, ${buddyName.trim()}`;
-      const base64Value = Buffer.from(payload, 'utf-8').toString('base64');
       await manager.writeCharacteristicWithResponseForDevice(
-        connectedDevice.id,
-        SERVICE_UUID,
-        CHAR_UUID,
-        base64Value
+        connectedDevice.id, SERVICE_UUID, CHAR_UUID,
+        Buffer.from(payload, 'utf-8').toString('base64')
       );
       setStep(4);
-    } catch (error: any) {
-      Alert.alert('Send Failed', error?.message || 'Failed to send data to device.');
-    } finally {
-      setIsLoading(false);
-    }
+    } catch (e: any) { Alert.alert('Send Failed', e?.message); }
+    finally { setIsLoading(false); }
   };
 
-  // ──────────────────────────────────────────────────────
-  // Step 4 – Read Grade Prediction
-  // ──────────────────────────────────────────────────────
+  // ── Step 4 ───────────────────────────────────────────────
   const readGrade = async () => {
-    if (!connectedDevice) return;
-    setIsLoading(true);
+    if (!connectedDevice) return; setIsLoading(true);
     try {
-      const characteristic = await manager.readCharacteristicForDevice(
-        connectedDevice.id,
-        SERVICE_UUID,
-        CHAR_UUID
-      );
-      const raw = Buffer.from(characteristic.value || '', 'base64').toString('utf-8');
-      setGradeResult(raw);
-    } catch (error: any) {
-      Alert.alert('Read Failed', error?.message || 'Failed to read grade result.');
-    } finally {
-      setIsLoading(false);
-    }
+      const ch = await manager.readCharacteristicForDevice(connectedDevice.id, SERVICE_UUID, CHAR_UUID);
+      setGradeResult(Buffer.from(ch.value || '', 'base64').toString('utf-8'));
+    } catch (e: any) { Alert.alert('Read Failed', e?.message); }
+    finally { setIsLoading(false); }
   };
 
   const disconnectDevice = async () => {
-    if (!connectedDevice) return;
-    try {
-      await manager.cancelDeviceConnection(connectedDevice.id);
-    } catch (_) {}
-    setConnectedDevice(null);
-    setStep(1);
-    setDevices([]);
-    setInitialValue('');
-    setMyName('');
-    setBuddyName('');
-    setGradeResult('');
+    try { if (connectedDevice) await manager.cancelDeviceConnection(connectedDevice.id); } catch (_) {}
+    setConnectedDevice(null); setStep(1); setDevices([]);
+    setInitialValue(''); setMyName(''); setBuddyName(''); setGradeResult('');
   };
 
-  // ──────────────────────────────────────────────────────
-  // Stepper Progress Bar
-  // ──────────────────────────────────────────────────────
-  const StepperBar = () => (
-    <View style={styles.stepperContainer}>
-      {([1, 2, 3, 4] as Step[]).map((s, i) => (
-        <React.Fragment key={s}>
-          <View style={styles.stepperNode}>
-            <View style={[styles.stepperCircle, step >= s && styles.stepperCircleActive]}>
-              {step > s ? (
-                <Text style={styles.stepperCheck}>✓</Text>
-              ) : (
-                <Text style={[styles.stepperNum, step === s && styles.stepperNumActive]}>
-                  {s}
-                </Text>
-              )}
-            </View>
-            <Text style={[styles.stepperLabel, step === s && styles.stepperLabelActive]}>
-              {STEP_LABELS[s]}
-            </Text>
-          </View>
-          {i < 3 && (
-            <View style={[styles.stepperLine, step > s && styles.stepperLineActive]} />
-          )}
-        </React.Fragment>
-      ))}
-    </View>
-  );
+  // ── small helpers ────────────────────────────────────────
+  const isActive  = (s: Step) => step === s;
+  const isDone    = (s: Step) => step > s;
+  const isLocked  = (s: Step) => step < s;
 
+  const scanRingScale   = scanRing.interpolate({ inputRange: [0, 1], outputRange: [1, 2.2] });
+  const scanRingOpacity = scanRing.interpolate({ inputRange: [0, 1], outputRange: [0.7, 0] });
+
+  // ── render ───────────────────────────────────────────────
   return (
-    <View style={styles.root}>
-      {/* Background gradient blobs */}
-      <View style={styles.blob1} />
-      <View style={styles.blob2} />
+    <View style={s.root}>
 
-      <ScrollView
-        style={styles.scroll}
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-      >
-        {/* ── Header ── */}
-        <View style={styles.header}>
-          <View style={styles.iconRing}>
-            <Text style={styles.iconEmoji}>🔮</Text>
+      {/* ── decorative corner marks ── */}
+      <View style={[s.corner, s.cornerTL]} /><View style={[s.corner, s.cornerTR]} />
+      <View style={[s.corner, s.cornerBL]} /><View style={[s.corner, s.cornerBR]} />
+
+      {/* ── horizontal scan‑line stripes (static ambiance) ── */}
+      {[0.15, 0.38, 0.62, 0.85].map((t, i) => (
+        <View key={i} style={[s.ambientLine, { top: `${t * 100}%` as any }]} />
+      ))}
+
+      <ScrollView style={s.scroll} contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
+
+        {/* ══════════ HEADER ══════════ */}
+        <View style={s.headerWrap}>
+          {/* outer ring */}
+          <View style={s.orbitRing}>
+            <Animated.View style={[s.orbitDot, {
+              transform: [{
+                rotate: headerBob.interpolate({ inputRange: [-8, 0], outputRange: ['0deg', '360deg'] })
+              }]
+            }]} />
           </View>
-          <Text style={styles.appTitle}>BLE Grade Predictor</Text>
-          <Text style={styles.appSubtitle}>Bluetooth Smart Assessment System</Text>
+
+          <Animated.View style={[s.crystalBall, { transform: [{ translateY: headerBob }] }]}>
+            <Text style={s.crystalEmoji}>🔮</Text>
+          </Animated.View>
+
+          <Text style={s.title}>BLE GRADE PREDICTOR</Text>
+          <View style={s.titleUnderline} />
+          <Text style={s.subtitle}>[ BLUETOOTH SMART ASSESSMENT ]</Text>
         </View>
 
-        {/* ── Stepper ── */}
-        <StepperBar />
+        {/* ══════════ STEP PIPELINE ══════════ */}
+        <View style={s.pipeline}>
+          {([1,2,3,4] as Step[]).map((n, i) => (
+            <React.Fragment key={n}>
+              <View style={s.pipeNode}>
+                <View style={[
+                  s.pipeCircle,
+                  isActive(n) && s.pipeCircleActive,
+                  isDone(n)   && s.pipeCircleDone,
+                ]}>
+                  <Text style={[s.pipeNum, (isActive(n)||isDone(n)) && s.pipeNumBright]}>
+                    {isDone(n) ? '✓' : n}
+                  </Text>
+                </View>
+              </View>
+              {i < 3 && (
+                <View style={[s.pipeLine, isDone(n) && s.pipeLineFilled]} />
+              )}
+            </React.Fragment>
+          ))}
+        </View>
 
-        {/* ═══════════════════════════════════════════
-            STEP 1 – Scan & Connect
-        ════════════════════════════════════════════ */}
-        <View style={[styles.card, step === 1 ? styles.cardActive : step > 1 ? styles.cardDone : styles.cardLocked]}>
-          <View style={styles.cardHeader}>
-            <View style={[styles.badge, step === 1 && styles.badgeActive, step > 1 && styles.badgeDone]}>
-              <Text style={styles.badgeText}>{step > 1 ? '✓' : '01'}</Text>
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.cardTitle}>Scan &amp; Connect Device</Text>
-              <Text style={styles.cardDesc}>Find your instructor's BLE device</Text>
-            </View>
-          </View>
-
+        {/* ══════════ CARD 1 – SCAN ══════════ */}
+        <CardShell step={1} current={step} icon="01" title="SCAN & CONNECT" tag="BLE DISCOVERY">
           {!connectedDevice ? (
             <>
               <TouchableOpacity
-                style={[styles.btn, isScanning && styles.btnScanning]}
+                style={[s.neonBtn, isScanning && s.neonBtnActive]}
                 onPress={startScan}
                 disabled={isScanning || isLoading}
                 activeOpacity={0.75}
               >
-                {isScanning ? (
-                  <View style={styles.scanningRow}>
-                    <Animated.View style={[styles.scanDot, { transform: [{ scale: pulseAnim }] }]} />
-                    <Text style={styles.btnText}>Scanning for devices...</Text>
+                {isScanning && (
+                  <View style={s.rippleWrap}>
+                    <Animated.View style={[s.ripple, {
+                      transform: [{ scale: scanRingScale }],
+                      opacity: scanRingOpacity,
+                    }]} />
                   </View>
-                ) : (
-                  <Text style={styles.btnText}>🔍  Scan Devices</Text>
                 )}
+                <Text style={s.neonBtnText}>
+                  {isScanning ? '◉  SCANNING…' : '◎  START SCAN'}
+                </Text>
               </TouchableOpacity>
 
               {devices.length > 0 && (
-                <View style={styles.deviceList}>
-                  <Text style={styles.listLabel}>Found Devices</Text>
-                  {devices.map((device) => (
-                    <TouchableOpacity
-                      key={device.id}
-                      style={styles.deviceItem}
-                      onPress={() => connectToDevice(device)}
-                      activeOpacity={0.7}
-                    >
-                      <View style={styles.deviceIcon}>
-                        <Text style={{ fontSize: 16 }}>📡</Text>
+                <View style={s.devList}>
+                  <Text style={s.secLabel}>// NEARBY DEVICES</Text>
+                  {devices.map(dev => (
+                    <TouchableOpacity key={dev.id} style={s.devRow} onPress={() => connectToDevice(dev)} activeOpacity={0.7}>
+                      <View style={s.devSignal}>
+                        <View style={[s.bar, s.bar1]} /><View style={[s.bar, s.bar2]} /><View style={[s.bar, s.bar3]} />
                       </View>
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.deviceName}>{device.name || 'Unknown Device'}</Text>
-                        <Text style={styles.deviceId}>{device.id}</Text>
+                        <Text style={s.devName}>{dev.name || 'Unknown Device'}</Text>
+                        <Text style={s.devId}>{dev.id}</Text>
                       </View>
-                      <Text style={styles.connectArrow}>›</Text>
+                      <Text style={s.devArrow}>⟩</Text>
                     </TouchableOpacity>
                   ))}
                 </View>
               )}
 
               {isScanning && devices.length === 0 && (
-                <View style={styles.emptyHint}>
-                  <Text style={styles.emptyHintText}>Looking for nearby BLE devices…</Text>
-                </View>
+                <Text style={s.hint}>Searching for BLE devices nearby…</Text>
               )}
             </>
           ) : (
-            <View style={styles.connectedCard}>
-              <View style={styles.connectedLeft}>
-                <View style={styles.connectedDot} />
+            <View style={s.connRow}>
+              <View style={s.connLeft}>
+                <View style={s.onlineDot} />
                 <View>
-                  <Text style={styles.connectedTitle}>Connected</Text>
-                  <Text style={styles.connectedName}>{connectedDevice.name || connectedDevice.id}</Text>
+                  <Text style={s.onlineLabel}>CONNECTED</Text>
+                  <Text style={s.onlineName}>{connectedDevice.name || connectedDevice.id}</Text>
                 </View>
               </View>
-              <TouchableOpacity style={styles.disconnectBtn} onPress={disconnectDevice}>
-                <Text style={styles.disconnectText}>Disconnect</Text>
+              <TouchableOpacity style={s.killBtn} onPress={disconnectDevice}>
+                <Text style={s.killText}>✕ END</Text>
               </TouchableOpacity>
             </View>
           )}
-        </View>
+        </CardShell>
 
-        {/* ═══════════════════════════════════════════
-            STEP 2 – Read Initial Value
-        ════════════════════════════════════════════ */}
-        <View style={[styles.card, step === 2 ? styles.cardActive : step > 2 ? styles.cardDone : styles.cardLocked]}>
-          <View style={styles.cardHeader}>
-            <View style={[styles.badge, step === 2 && styles.badgeActive, step > 2 && styles.badgeDone]}>
-              <Text style={styles.badgeText}>{step > 2 ? '✓' : '02'}</Text>
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.cardTitle}>Read Initial Data</Text>
-              <Text style={styles.cardDesc}>Fetch the first value from the device</Text>
-            </View>
-          </View>
-
+        {/* ══════════ CARD 2 – READ INITIAL ══════════ */}
+        <CardShell step={2} current={step} icon="02" title="READ INITIAL DATA" tag="RX CHANNEL">
           <TouchableOpacity
-            style={[styles.btn, step !== 2 && styles.btnDisabled]}
+            style={[s.neonBtn, !isActive(2) && s.neonBtnLocked]}
             onPress={readInitialValue}
-            disabled={step !== 2 || isLoading}
+            disabled={!isActive(2) || isLoading}
             activeOpacity={0.75}
           >
-            <Text style={styles.btnText}>📥  Read Data</Text>
+            <Text style={s.neonBtnText}>▼  FETCH DATA</Text>
           </TouchableOpacity>
-
           {initialValue !== '' && (
-            <View style={styles.dataBox}>
-              <Text style={styles.dataBoxLabel}>DEVICE RESPONSE</Text>
-              <Text style={styles.dataBoxValue}>{initialValue}</Text>
+            <View style={s.dataPanel}>
+              <Text style={s.dataPanelLabel}>DEVICE RESPONSE ──────</Text>
+              <Text style={s.dataPanelValue}>{initialValue}</Text>
             </View>
           )}
-        </View>
+        </CardShell>
 
-        {/* ═══════════════════════════════════════════
-            STEP 3 – Send Names
-        ════════════════════════════════════════════ */}
-        <View style={[styles.card, step === 3 ? styles.cardActive : step > 3 ? styles.cardDone : styles.cardLocked]}>
-          <View style={styles.cardHeader}>
-            <View style={[styles.badge, step === 3 && styles.badgeActive, step > 3 && styles.badgeDone]}>
-              <Text style={styles.badgeText}>{step > 3 ? '✓' : '03'}</Text>
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.cardTitle}>Send Student Names</Text>
-              <Text style={styles.cardDesc}>Enter your name &amp; your buddy's name</Text>
-            </View>
-          </View>
-
-          <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Your Name</Text>
-            <TextInput
-              style={[styles.input, step !== 3 && styles.inputDisabled]}
-              placeholder="e.g. Somchai"
-              placeholderTextColor="#4B4570"
-              value={myName}
-              onChangeText={setMyName}
-              editable={step === 3}
-            />
-          </View>
-
-          <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Buddy's Name</Text>
-            <TextInput
-              style={[styles.input, step !== 3 && styles.inputDisabled]}
-              placeholder="e.g. Malee"
-              placeholderTextColor="#4B4570"
-              value={buddyName}
-              onChangeText={setBuddyName}
-              editable={step === 3}
-            />
-          </View>
-
+        {/* ══════════ CARD 3 – SEND NAMES ══════════ */}
+        <CardShell step={3} current={step} icon="03" title="SEND NAMES" tag="TX CHANNEL">
+          <Text style={s.fieldLabel}>YOUR NAME</Text>
+          <TextInput
+            style={[s.textField, !isActive(3) && s.textFieldLocked]}
+            placeholder="e.g. Somchai"
+            placeholderTextColor={C.muted}
+            value={myName}
+            onChangeText={setMyName}
+            editable={isActive(3)}
+          />
+          <Text style={s.fieldLabel}>BUDDY'S NAME</Text>
+          <TextInput
+            style={[s.textField, !isActive(3) && s.textFieldLocked]}
+            placeholder="e.g. Malee"
+            placeholderTextColor={C.muted}
+            value={buddyName}
+            onChangeText={setBuddyName}
+            editable={isActive(3)}
+          />
           <TouchableOpacity
-            style={[styles.btnPrimary, step !== 3 && styles.btnDisabled]}
+            style={[s.magentaBtn, !isActive(3) && s.neonBtnLocked]}
             onPress={sendNames}
-            disabled={step !== 3 || isLoading}
+            disabled={!isActive(3) || isLoading}
             activeOpacity={0.75}
           >
-            <Text style={styles.btnPrimaryText}>📤  Send Names to Device</Text>
+            <Text style={s.magentaBtnText}>▲  TRANSMIT</Text>
           </TouchableOpacity>
-        </View>
+        </CardShell>
 
-        {/* ═══════════════════════════════════════════
-            STEP 4 – Read Grade
-        ════════════════════════════════════════════ */}
-        <View style={[styles.card, step === 4 ? styles.cardActive : styles.cardLocked]}>
-          <View style={styles.cardHeader}>
-            <View style={[styles.badge, step === 4 && styles.badgeAccent]}>
-              <Text style={styles.badgeText}>04</Text>
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.cardTitle}>Grade Prediction</Text>
-              <Text style={styles.cardDesc}>Read the AI-predicted grade from device</Text>
-            </View>
-          </View>
-
+        {/* ══════════ CARD 4 – GRADE ══════════ */}
+        <CardShell step={4} current={step} icon="04" title="GRADE PREDICTION" tag="AI ORACLE">
           <TouchableOpacity
-            style={[styles.btnAccent, step !== 4 && styles.btnDisabled]}
+            style={[s.accentBtn, !isActive(4) && s.neonBtnLocked]}
             onPress={readGrade}
-            disabled={step !== 4 || isLoading}
+            disabled={!isActive(4) || isLoading}
             activeOpacity={0.75}
           >
-            <Text style={styles.btnAccentText}>🎯  Reveal My Grade</Text>
+            <Text style={s.accentBtnText}>✦  REVEAL GRADE</Text>
           </TouchableOpacity>
 
           {gradeResult !== '' && (
-            <View style={styles.gradeCard}>
-              <Text style={styles.gradeCardLabel}>✨  PREDICTED GRADE  ✨</Text>
-              <Animated.Text
-                style={[
-                  styles.gradeValue,
-                  {
-                    opacity: glowAnim.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [0.8, 1],
-                    }),
-                  },
-                ]}
-              >
+            <Animated.View style={[s.gradeReveal, {
+              transform: [{ scale: gradePop }],
+              opacity: gradePop,
+            }]}>
+              {/* top bar */}
+              <View style={s.gradeTopBar}>
+                <View style={s.gradeTopDash} /><View style={s.gradeTopDash} /><View style={s.gradeTopDash} />
+              </View>
+
+              <Text style={s.gradeLabel}>✦  PREDICTED GRADE  ✦</Text>
+
+              <Animated.Text style={[s.gradeChar, { opacity: gradeGlow.interpolate({ inputRange: [0.4, 1], outputRange: [0.75, 1] }) }]}>
                 {gradeResult}
               </Animated.Text>
-              <View style={styles.gradeGlow} />
-            </View>
-          )}
-        </View>
 
-        {/* bottom spacer */}
-        <View style={{ height: 40 }} />
+              {/* corner accents */}
+              <View style={[s.gradeCorner, s.gCTL]} /><View style={[s.gradeCorner, s.gCTR]} />
+              <View style={[s.gradeCorner, s.gCBL]} /><View style={[s.gradeCorner, s.gCBR]} />
+            </Animated.View>
+          )}
+        </CardShell>
+
+        <View style={{ height: 48 }} />
       </ScrollView>
 
-      {/* ── Loading Overlay ── */}
+      {/* ══════════ LOADING OVERLAY ══════════ */}
       {isLoading && (
-        <View style={styles.overlay}>
-          <View style={styles.overlayCard}>
-            <ActivityIndicator size="large" color="#A855F7" />
-            <Text style={styles.overlayText}>Processing…</Text>
+        <View style={s.overlay}>
+          <View style={s.overlayPanel}>
+            <View style={[s.gradeCorner, s.gCTL]} /><View style={[s.gradeCorner, s.gCTR]} />
+            <View style={[s.gradeCorner, s.gCBL]} /><View style={[s.gradeCorner, s.gCBR]} />
+            <ActivityIndicator size="large" color={C.neon} />
+            <Text style={s.overlayText}>PROCESSING</Text>
+            <Text style={s.overlayDots}>• • •</Text>
           </View>
         </View>
       )}
@@ -507,517 +414,336 @@ export default function Index() {
   );
 }
 
-// ─────────────────────────────────────────────────────────
-// STYLES
-// ─────────────────────────────────────────────────────────
-const PURPLE = '#8B5CF6';
-const PURPLE_LIGHT = '#A855F7';
-const PURPLE_DARK = '#6D28D9';
-const BG = '#080612';
-const CARD_BG = '#10091F';
-const CARD_BORDER = '#1E1535';
+// ─── Card shell component ────────────────────────────────────────────────────
+type CardProps = {
+  step: Step; current: Step;
+  icon: string; title: string; tag: string;
+  children: React.ReactNode;
+};
+function CardShell({ step, current, icon, title, tag, children }: CardProps) {
+  const active = current === step;
+  const done   = current > step;
+  const locked = current < step;
+  return (
+    <View style={[
+      s.card,
+      active && s.cardActive,
+      done   && s.cardDone,
+      locked && s.cardLocked,
+    ]}>
+      {/* left neon strip */}
+      <View style={[s.cardStrip, active && s.cardStripActive, done && s.cardStripDone]} />
 
-const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: BG,
+      {/* top-right tag */}
+      <View style={[s.cardTag, active && s.cardTagActive]}>
+        <Text style={s.cardTagText}>{tag}</Text>
+      </View>
+
+      {/* header row */}
+      <View style={s.cardHead}>
+        <View style={[s.cardNum, active && s.cardNumActive, done && s.cardNumDone]}>
+          <Text style={s.cardNumText}>{done ? '✓' : icon}</Text>
+        </View>
+        <Text style={[s.cardTitle, active && s.cardTitleActive]}>{title}</Text>
+      </View>
+
+      <View style={s.cardDivider} />
+
+      <View style={s.cardBody}>{children}</View>
+    </View>
+  );
+}
+
+// ─── Styles ──────────────────────────────────────────────────────────────────
+const s = StyleSheet.create({
+
+  root: { flex: 1, backgroundColor: C.bg },
+
+  // ambient decorations
+  corner: {
+    position: 'absolute', width: 20, height: 20,
+    borderColor: C.neonDim, opacity: 0.4,
   },
-  blob1: {
-    position: 'absolute',
-    top: -120,
-    right: -80,
-    width: 320,
-    height: 320,
-    borderRadius: 160,
-    backgroundColor: 'rgba(109,40,217,0.18)',
+  cornerTL: { top: 18, left: 18, borderTopWidth: 2, borderLeftWidth: 2 },
+  cornerTR: { top: 18, right: 18, borderTopWidth: 2, borderRightWidth: 2 },
+  cornerBL: { bottom: 18, left: 18, borderBottomWidth: 2, borderLeftWidth: 2 },
+  cornerBR: { bottom: 18, right: 18, borderBottomWidth: 2, borderRightWidth: 2 },
+  ambientLine: {
+    position: 'absolute', left: 0, right: 0, height: 1,
+    backgroundColor: C.neon, opacity: 0.03,
   },
-  blob2: {
-    position: 'absolute',
-    bottom: 80,
-    left: -100,
-    width: 280,
-    height: 280,
-    borderRadius: 140,
-    backgroundColor: 'rgba(168,85,247,0.10)',
-  },
+
   scroll: { flex: 1 },
-  scrollContent: {
-    paddingHorizontal: 20,
-    paddingTop: 56,
-    paddingBottom: 20,
-  },
+  content: { paddingHorizontal: 18, paddingTop: 60, paddingBottom: 20 },
 
   // ── Header ──
-  header: {
-    alignItems: 'center',
-    marginBottom: 32,
+  headerWrap: { alignItems: 'center', marginBottom: 36 },
+  orbitRing: {
+    position: 'absolute', top: -6,
+    width: 90, height: 90, borderRadius: 45,
+    borderWidth: 1, borderColor: C.neonDim,
+    borderStyle: 'dashed', opacity: 0.4,
   },
-  iconRing: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    borderWidth: 1.5,
-    borderColor: PURPLE,
-    backgroundColor: '#1A0F35',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 14,
-    shadowColor: PURPLE,
+  orbitDot: {
+    position: 'absolute', top: -4, left: '50%',
+    marginLeft: -4, width: 8, height: 8,
+    borderRadius: 4, backgroundColor: C.neon,
+  },
+  crystalBall: {
+    width: 78, height: 78, borderRadius: 39,
+    backgroundColor: '#140830',
+    borderWidth: 1.5, borderColor: C.neon,
+    justifyContent: 'center', alignItems: 'center',
+    shadowColor: C.neon,
     shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.6,
-    shadowRadius: 20,
-    elevation: 8,
-  },
-  iconEmoji: { fontSize: 32 },
-  appTitle: {
-    fontSize: 28,
-    fontWeight: '900',
-    color: '#FFFFFF',
-    letterSpacing: 0.4,
-    textAlign: 'center',
-  },
-  appSubtitle: {
-    marginTop: 6,
-    fontSize: 13,
-    color: '#9F7AEA',
-    letterSpacing: 0.6,
-    fontWeight: '500',
-    textAlign: 'center',
-  },
-
-  // ── Stepper ──
-  stepperContainer: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'center',
-    marginBottom: 28,
-    paddingHorizontal: 4,
-  },
-  stepperNode: {
-    alignItems: 'center',
-    width: 68,
-  },
-  stepperCircle: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    borderWidth: 2,
-    borderColor: '#2A1F4A',
-    backgroundColor: '#100B22',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  stepperCircleActive: {
-    borderColor: PURPLE,
-    backgroundColor: PURPLE,
-    shadowColor: PURPLE,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.7,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  stepperNum: { fontSize: 12, color: '#4B4570', fontWeight: '700' },
-  stepperNumActive: { color: '#FFFFFF' },
-  stepperCheck: { fontSize: 13, color: '#FFFFFF', fontWeight: '900' },
-  stepperLabel: {
-    marginTop: 5,
-    fontSize: 9,
-    color: '#4B4570',
-    fontWeight: '600',
-    textAlign: 'center',
-    letterSpacing: 0.3,
-  },
-  stepperLabelActive: { color: '#C084FC' },
-  stepperLine: {
-    flex: 1,
-    height: 2,
-    backgroundColor: '#1E1535',
-    marginTop: 14,
-    marginHorizontal: 2,
-  },
-  stepperLineActive: { backgroundColor: PURPLE },
-
-  // ── Cards ──
-  card: {
-    backgroundColor: CARD_BG,
-    borderRadius: 20,
-    padding: 20,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: CARD_BORDER,
-  },
-  cardActive: {
-    borderColor: PURPLE,
-    borderWidth: 1.5,
-    shadowColor: PURPLE,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 16,
-    elevation: 6,
-  },
-  cardDone: {
-    borderColor: '#2A1F4A',
-    opacity: 0.7,
-  },
-  cardLocked: {
-    opacity: 0.35,
-  },
-  cardHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
+    shadowOpacity: 0.9, shadowRadius: 22, elevation: 12,
     marginBottom: 18,
   },
-  badge: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: '#1A1030',
-    borderWidth: 1,
-    borderColor: '#2A1F4A',
+  crystalEmoji: { fontSize: 36 },
+  title: {
+    fontSize: 20, fontWeight: '900', color: C.white,
+    letterSpacing: 3, textAlign: 'center',
+  },
+  titleUnderline: {
+    width: 120, height: 2, marginTop: 8, marginBottom: 8,
+    backgroundColor: C.neon, opacity: 0.7,
+    shadowColor: C.neon, shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.8, shadowRadius: 8,
+  },
+  subtitle: {
+    fontSize: 10, color: C.textMuted,
+    letterSpacing: 2.5, fontWeight: '600',
+  },
+
+  // ── Pipeline ──
+  pipeline: {
+    flexDirection: 'row', alignItems: 'center',
     justifyContent: 'center',
-    alignItems: 'center',
+    marginBottom: 28, paddingHorizontal: 8,
   },
-  badgeActive: {
-    backgroundColor: PURPLE_DARK,
-    borderColor: PURPLE,
-    shadowColor: PURPLE,
+  pipeNode: { alignItems: 'center' },
+  pipeCircle: {
+    width: 32, height: 32, borderRadius: 16,
+    borderWidth: 1.5, borderColor: C.border,
+    backgroundColor: C.surface,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  pipeCircleActive: {
+    borderColor: C.neon, backgroundColor: '#200A40',
+    shadowColor: C.neon, shadowOpacity: 0.8, shadowRadius: 10, elevation: 4,
+  },
+  pipeCircleDone: { borderColor: C.neonDim, backgroundColor: '#2A0E50' },
+  pipeNum: { fontSize: 12, fontWeight: '800', color: C.muted },
+  pipeNumBright: { color: C.neonGlow },
+  pipeLine: {
+    flex: 1, height: 1.5, marginHorizontal: 4,
+    backgroundColor: C.border,
+  },
+  pipeLineFilled: { backgroundColor: C.neonDim },
+
+  // ── Card ──
+  card: {
+    marginBottom: 16, borderRadius: 4,
+    borderWidth: 1, borderColor: C.border,
+    backgroundColor: C.surface,
+    overflow: 'hidden',
+  },
+  cardActive: {
+    borderColor: C.neon,
+    shadowColor: C.neon,
     shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.5,
-    shadowRadius: 8,
-    elevation: 4,
+    shadowOpacity: 0.35, shadowRadius: 18, elevation: 8,
   },
-  badgeDone: {
-    backgroundColor: '#4C1D95',
-    borderColor: '#7C3AED',
+  cardDone:   { borderColor: '#261045', opacity: 0.65 },
+  cardLocked: { opacity: 0.28 },
+
+  cardStrip: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, backgroundColor: C.border },
+  cardStripActive: { backgroundColor: C.neon, shadowColor: C.neon, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 1, shadowRadius: 8 },
+  cardStripDone: { backgroundColor: C.neonDim },
+
+  cardTag: {
+    position: 'absolute', top: 0, right: 0,
+    backgroundColor: C.border,
+    paddingHorizontal: 8, paddingVertical: 3,
+    borderBottomLeftRadius: 6,
   },
-  badgeAccent: {
-    backgroundColor: PURPLE_LIGHT,
-    borderColor: '#DDD6FE',
+  cardTagActive: { backgroundColor: '#1A0840' },
+  cardTagText: { fontSize: 9, color: C.textMuted, letterSpacing: 1.5, fontWeight: '700' },
+
+  cardHead: {
+    flexDirection: 'row', alignItems: 'center',
+    gap: 12, paddingHorizontal: 18, paddingTop: 18, paddingBottom: 12,
   },
-  badgeText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '800',
+  cardNum: {
+    width: 34, height: 34, borderRadius: 2,
+    borderWidth: 1, borderColor: C.border,
+    justifyContent: 'center', alignItems: 'center',
+    backgroundColor: '#0D0525',
   },
-  cardTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: '#F5F3FF',
-    letterSpacing: 0.2,
+  cardNumActive: {
+    borderColor: C.neon, backgroundColor: '#1E0840',
+    shadowColor: C.neon, shadowOpacity: 0.6, shadowRadius: 8,
   },
-  cardDesc: {
-    fontSize: 12,
-    color: '#7C6FA0',
-    marginTop: 2,
-    fontWeight: '400',
-  },
+  cardNumDone: { borderColor: C.neonDim, backgroundColor: '#180540' },
+  cardNumText: { fontSize: 12, fontWeight: '900', color: C.neonGlow },
+  cardTitle: { fontSize: 13, fontWeight: '900', color: C.muted, letterSpacing: 2 },
+  cardTitleActive: { color: C.white },
+
+  cardDivider: { height: 1, backgroundColor: C.border, marginHorizontal: 18, marginBottom: 16 },
+  cardBody: { paddingHorizontal: 18, paddingBottom: 18 },
 
   // ── Buttons ──
-  btn: {
-    backgroundColor: '#1A1030',
-    paddingVertical: 14,
-    borderRadius: 14,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#3B2D6A',
-    marginBottom: 4,
+  neonBtn: {
+    borderWidth: 1, borderColor: C.neonDim,
+    borderRadius: 3, paddingVertical: 14,
+    alignItems: 'center', backgroundColor: '#130828',
+    marginBottom: 4, position: 'relative', overflow: 'hidden',
   },
-  btnScanning: {
-    borderColor: PURPLE,
-    backgroundColor: '#1D1240',
-  },
-  btnDisabled: {
-    opacity: 0.4,
-  },
-  btnText: {
-    color: '#DDD6FE',
-    fontWeight: '700',
-    fontSize: 14,
-    letterSpacing: 0.4,
-  },
-  btnPrimary: {
-    backgroundColor: PURPLE_DARK,
-    paddingVertical: 15,
-    borderRadius: 14,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: PURPLE,
-    shadowColor: PURPLE,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 10,
-    elevation: 5,
-  },
-  btnPrimaryText: {
-    color: '#FFFFFF',
-    fontWeight: '800',
-    fontSize: 15,
-    letterSpacing: 0.5,
-  },
-  btnAccent: {
-    backgroundColor: PURPLE_LIGHT,
-    paddingVertical: 16,
-    borderRadius: 14,
-    alignItems: 'center',
-    shadowColor: PURPLE_LIGHT,
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.55,
-    shadowRadius: 14,
-    elevation: 8,
-  },
-  btnAccentText: {
-    color: '#FFFFFF',
-    fontWeight: '900',
-    fontSize: 16,
-    letterSpacing: 0.6,
-  },
+  neonBtnActive: { borderColor: C.neon, backgroundColor: '#1D0C3C' },
+  neonBtnLocked: { opacity: 0.35 },
+  neonBtnText: { color: C.neonGlow, fontWeight: '800', fontSize: 13, letterSpacing: 2.5 },
 
-  // ── Scanning row ──
-  scanningRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
+  magentaBtn: {
+    borderWidth: 1, borderColor: C.magenta,
+    borderRadius: 3, paddingVertical: 14,
+    alignItems: 'center', backgroundColor: '#20062A',
+    shadowColor: C.magenta, shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.4, shadowRadius: 10, elevation: 4,
   },
-  scanDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: PURPLE_LIGHT,
-    shadowColor: PURPLE_LIGHT,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.8,
-    shadowRadius: 6,
+  magentaBtnText: { color: C.magenta, fontWeight: '900', fontSize: 13, letterSpacing: 2.5 },
+
+  accentBtn: {
+    borderWidth: 1.5, borderColor: C.neon,
+    borderRadius: 3, paddingVertical: 16,
+    alignItems: 'center', backgroundColor: '#1B0A3C',
+    shadowColor: C.neon, shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6, shadowRadius: 14, elevation: 6,
+  },
+  accentBtnText: { color: C.neon, fontWeight: '900', fontSize: 14, letterSpacing: 3 },
+
+  // ── Scan ripple ──
+  rippleWrap: {
+    position: 'absolute', width: 44, height: 44,
+    borderRadius: 22, alignSelf: 'center',
+  },
+  ripple: {
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: C.neon, position: 'absolute',
   },
 
   // ── Device list ──
-  deviceList: { marginTop: 14 },
-  listLabel: {
-    fontSize: 11,
-    color: '#7C6FA0',
-    fontWeight: '700',
-    letterSpacing: 1,
-    marginBottom: 8,
-    textTransform: 'uppercase',
+  devList: { marginTop: 14 },
+  secLabel: { fontSize: 10, color: C.textMuted, letterSpacing: 2, fontWeight: '700', marginBottom: 10 },
+  devRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: '#0D0524', borderWidth: 1, borderColor: '#1D0D40',
+    borderRadius: 3, padding: 12, marginBottom: 8,
   },
-  deviceItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#14092A',
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: '#3B2D6A',
-    gap: 12,
-  },
-  deviceIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: '#1E1040',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  deviceName: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#EDE9FE',
-  },
-  deviceId: {
-    fontSize: 10,
-    color: '#6D5FA0',
-    marginTop: 2,
-  },
-  connectArrow: {
-    fontSize: 22,
-    color: PURPLE_LIGHT,
-    fontWeight: '300',
-  },
-  emptyHint: {
-    marginTop: 12,
-    alignItems: 'center',
-  },
-  emptyHintText: {
-    color: '#4B4570',
-    fontSize: 13,
-    fontStyle: 'italic',
-  },
+  devSignal: { flexDirection: 'row', alignItems: 'flex-end', gap: 2, height: 20 },
+  bar: { width: 3, backgroundColor: C.neonDim, borderRadius: 1 },
+  bar1: { height: 6 }, bar2: { height: 11 }, bar3: { height: 18 },
+  devName: { fontSize: 13, fontWeight: '700', color: C.white },
+  devId:   { fontSize: 10, color: C.textMuted, marginTop: 2 },
+  devArrow:{ fontSize: 18, color: C.neon, fontWeight: '300' },
+
+  hint: { textAlign: 'center', color: C.muted, fontSize: 12, marginTop: 12, fontStyle: 'italic' },
 
   // ── Connected ──
-  connectedCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: '#14092A',
-    borderRadius: 14,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: PURPLE,
+  connRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: '#0D0524', borderWidth: 1, borderColor: C.neon,
+    borderRadius: 3, padding: 14,
+    shadowColor: C.neon, shadowOpacity: 0.2, shadowRadius: 8,
   },
-  connectedLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    flex: 1,
+  connLeft: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
+  onlineDot: {
+    width: 10, height: 10, borderRadius: 5, backgroundColor: C.green,
+    shadowColor: C.green, shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1, shadowRadius: 6,
   },
-  connectedDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: '#34D399',
-    shadowColor: '#34D399',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.8,
-    shadowRadius: 5,
+  onlineLabel: { fontSize: 9, color: C.green, fontWeight: '800', letterSpacing: 2 },
+  onlineName:  { fontSize: 12, color: C.white, fontWeight: '600', marginTop: 2 },
+  killBtn: {
+    borderWidth: 1, borderColor: C.red, borderRadius: 2,
+    paddingHorizontal: 12, paddingVertical: 7,
+    backgroundColor: '#1A0010',
   },
-  connectedTitle: {
-    fontSize: 11,
-    color: '#34D399',
-    fontWeight: '700',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-  },
-  connectedName: {
-    fontSize: 13,
-    color: '#DDD6FE',
-    fontWeight: '600',
-    marginTop: 1,
-  },
-  disconnectBtn: {
-    backgroundColor: '#3D0C1C',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#BE185D',
-  },
-  disconnectText: {
-    color: '#FBCFE8',
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 0.3,
-  },
+  killText: { color: C.red, fontSize: 11, fontWeight: '800', letterSpacing: 1 },
 
-  // ── Data Box ──
-  dataBox: {
-    marginTop: 14,
-    backgroundColor: '#12082A',
-    borderRadius: 14,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#4C1D95',
-    alignItems: 'center',
+  // ── Data panel ──
+  dataPanel: {
+    marginTop: 14, backgroundColor: '#080220',
+    borderWidth: 1, borderColor: '#2A1050',
+    borderRadius: 2, padding: 16,
+    borderLeftWidth: 3, borderLeftColor: C.indigo,
   },
-  dataBoxLabel: {
-    fontSize: 10,
-    color: '#9F7AEA',
-    fontWeight: '700',
-    letterSpacing: 1.5,
-    marginBottom: 6,
-    textTransform: 'uppercase',
+  dataPanelLabel: {
+    fontSize: 9, color: C.indigo, fontWeight: '800',
+    letterSpacing: 2, marginBottom: 8,
   },
-  dataBoxValue: {
-    fontSize: 18,
-    color: '#EDE9FE',
-    fontWeight: '700',
-    textAlign: 'center',
-  },
+  dataPanelValue: { fontSize: 17, color: C.neonGlow, fontWeight: '700' },
 
   // ── Inputs ──
-  inputGroup: { marginBottom: 12 },
-  inputLabel: {
-    fontSize: 11,
-    color: '#7C6FA0',
-    fontWeight: '700',
-    letterSpacing: 0.8,
-    marginBottom: 6,
-    textTransform: 'uppercase',
+  fieldLabel: {
+    fontSize: 9, color: C.textMuted, fontWeight: '800',
+    letterSpacing: 2, marginBottom: 6, marginTop: 4,
   },
-  input: {
-    backgroundColor: '#0D0720',
-    borderWidth: 1,
-    borderColor: '#2A1F4A',
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 13,
-    fontSize: 15,
-    color: '#F5F3FF',
-    fontWeight: '500',
+  textField: {
+    backgroundColor: '#080220', borderWidth: 1, borderColor: '#2A1050',
+    borderRadius: 2, paddingHorizontal: 14, paddingVertical: 12,
+    fontSize: 15, color: C.white, fontWeight: '500',
+    marginBottom: 10,
+    borderLeftWidth: 2, borderLeftColor: C.neonDim,
   },
-  inputDisabled: {
-    opacity: 0.5,
-  },
+  textFieldLocked: { opacity: 0.4 },
 
-  // ── Grade card ──
-  gradeCard: {
-    marginTop: 18,
-    backgroundColor: '#0F062B',
-    borderRadius: 20,
-    paddingVertical: 30,
-    paddingHorizontal: 20,
-    alignItems: 'center',
-    borderWidth: 1.5,
-    borderColor: PURPLE_LIGHT,
-    shadowColor: PURPLE_LIGHT,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.5,
-    shadowRadius: 24,
-    elevation: 10,
-    overflow: 'hidden',
+  // ── Grade reveal ──
+  gradeReveal: {
+    marginTop: 18, borderWidth: 1.5, borderColor: C.neon,
+    borderRadius: 4, backgroundColor: '#0A0222',
+    paddingVertical: 28, alignItems: 'center', overflow: 'hidden',
+    shadowColor: C.neon, shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6, shadowRadius: 24, elevation: 10,
   },
-  gradeCardLabel: {
-    fontSize: 11,
-    color: '#C084FC',
-    fontWeight: '800',
-    letterSpacing: 2,
-    marginBottom: 14,
-    textTransform: 'uppercase',
+  gradeTopBar: {
+    flexDirection: 'row', gap: 6, marginBottom: 16,
   },
-  gradeValue: {
-    fontSize: 80,
-    fontWeight: '900',
-    color: '#E9D5FF',
-    textShadowColor: 'rgba(168,85,247,0.8)',
+  gradeTopDash: { width: 24, height: 2, backgroundColor: C.neonDim },
+  gradeLabel: {
+    fontSize: 10, color: C.neonGlow, fontWeight: '900',
+    letterSpacing: 3, marginBottom: 14,
+  },
+  gradeChar: {
+    fontSize: 96, fontWeight: '900', color: C.neon,
+    lineHeight: 104,
+    textShadowColor: C.neon,
     textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 20,
-    lineHeight: 90,
+    textShadowRadius: 28,
   },
-  gradeGlow: {
-    position: 'absolute',
-    bottom: -40,
-    width: 200,
-    height: 100,
-    borderRadius: 100,
-    backgroundColor: 'rgba(168,85,247,0.15)',
-  },
+  // corner tick marks inside grade card
+  gradeCorner: { position: 'absolute', width: 12, height: 12, borderColor: C.neonDim },
+  gCTL: { top: 6, left: 6,   borderTopWidth: 1.5, borderLeftWidth: 1.5 },
+  gCTR: { top: 6, right: 6,  borderTopWidth: 1.5, borderRightWidth: 1.5 },
+  gCBL: { bottom: 6, left: 6,  borderBottomWidth: 1.5, borderLeftWidth: 1.5 },
+  gCBR: { bottom: 6, right: 6, borderBottomWidth: 1.5, borderRightWidth: 1.5 },
 
   // ── Overlay ──
   overlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(8,6,18,0.88)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 999,
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(4,0,15,0.9)',
+    justifyContent: 'center', alignItems: 'center', zIndex: 999,
   },
-  overlayCard: {
-    backgroundColor: '#12082A',
-    borderRadius: 20,
-    padding: 32,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: PURPLE,
-    shadowColor: PURPLE,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.4,
-    shadowRadius: 20,
-    elevation: 10,
+  overlayPanel: {
+    backgroundColor: '#0D0525', borderWidth: 1.5, borderColor: C.neon,
+    borderRadius: 4, padding: 36, alignItems: 'center',
+    shadowColor: C.neon, shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5, shadowRadius: 20, elevation: 12,
   },
   overlayText: {
-    marginTop: 14,
-    fontSize: 14,
-    color: '#C084FC',
-    fontWeight: '700',
-    letterSpacing: 1.5,
+    marginTop: 16, fontSize: 11, color: C.neon,
+    fontWeight: '900', letterSpacing: 4,
+  },
+  overlayDots: {
+    marginTop: 8, fontSize: 14, color: C.neonDim, letterSpacing: 4,
   },
 });
