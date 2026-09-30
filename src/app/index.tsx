@@ -1,27 +1,84 @@
-import { Buffer } from 'buffer'; // Run: npm install buffer
-import { useEffect, useState } from 'react';
+import { Buffer } from 'buffer';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  Alert, Button, FlatList, PermissionsAndroid, Platform,
-  StyleSheet, Text, TextInput, TouchableOpacity, View
+  ActivityIndicator,
+  Alert,
+  Animated,
+  PermissionsAndroid,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
-import { BleManager, Device } from 'react-native-ble-plx';
+import { BleManager, Device, State } from 'react-native-ble-plx';
 
 const manager = new BleManager();
 
-// Replace these with your target device's UUIDs
 const SERVICE_UUID = 'aee04821-1973-4e1f-a590-e84b10d580e7';
-const CHAR_UUID = 'cde07b1a-889b-44b7-a99f-c888dddac729'; //
-const CHAR_UUID_NOTIFY = 'cde07b1a-889b-44b7-a99f-c888dddac729'; // Same as CHAR_UUID for this example
+const CHAR_UUID = 'cde07b1a-889b-44b7-a99f-c888dddac729';
+
+type Step = 1 | 2 | 3 | 4;
+
+const STEP_LABELS: Record<Step, string> = {
+  1: 'Scan & Connect',
+  2: 'Read Initial Data',
+  3: 'Send Names',
+  4: 'Grade Prediction',
+};
 
 export default function Index() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
-  const [receivedData, setReceivedData] = useState<string>('');
-  const [writeValue, setWriteValue] = useState<string>('');
+  const [isScanning, setIsScanning] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [step, setStep] = useState<Step>(1);
+  const [initialValue, setInitialValue] = useState('');
+  const [myName, setMyName] = useState('');
+  const [buddyName, setBuddyName] = useState('');
+  const [gradeResult, setGradeResult] = useState('');
+
+  // Pulse animation for scanning dot
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const glowAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (isScanning) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, { toValue: 1.4, duration: 700, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 1, duration: 700, useNativeDriver: true }),
+        ])
+      ).start();
+    } else {
+      pulseAnim.setValue(1);
+    }
+  }, [isScanning]);
+
+  useEffect(() => {
+    if (gradeResult) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(glowAnim, { toValue: 1, duration: 1200, useNativeDriver: true }),
+          Animated.timing(glowAnim, { toValue: 0, duration: 1200, useNativeDriver: true }),
+        ])
+      ).start();
+    } else {
+      glowAnim.setValue(0);
+    }
+  }, [gradeResult]);
+
+  useEffect(() => {
+    return () => {
+      manager.stopDeviceScan();
+      manager.destroy();
+    };
+  }, []);
 
   async function requestPermissions() {
-    manager.stopDeviceScan();
-    if (Platform.OS === 'android') { // Android 12+ permissions
+    if (Platform.OS === 'android') {
       if (Platform.Version >= 31) {
         const granted = await PermissionsAndroid.requestMultiple([
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
@@ -33,168 +90,934 @@ export default function Index() {
           granted['android.permission.BLUETOOTH_CONNECT'] === PermissionsAndroid.RESULTS.GRANTED &&
           granted['android.permission.ACCESS_FINE_LOCATION'] === PermissionsAndroid.RESULTS.GRANTED
         );
-      } else { // Android 11 or lower
+      } else {
         const granted = await PermissionsAndroid.request(
           PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
         );
         return granted === PermissionsAndroid.RESULTS.GRANTED;
       }
     }
-    return true; // iOS handles this via Info.plist when the scan starts
+    return true;
   }
 
-  useEffect(() => { // Request permissions on mount
-    requestPermissions().then((granted) => {
-      if (!granted) {
-        console.log('Bluetooth permissions not granted');
-      }
-    });
-    return () => {
-      manager.stopDeviceScan();
-    };
-  }, []);
+  // ──────────────────────────────────────────────────────
+  // Step 1 – Scan & Connect
+  // ──────────────────────────────────────────────────────
+  const startScan = async () => {
+    const btState = await manager.state();
+    if (btState !== State.PoweredOn) {
+      Alert.alert('⚠️ Bluetooth Off', 'Please turn on Bluetooth and try again.');
+      return;
+    }
+    const permGranted = await requestPermissions();
+    if (!permGranted) {
+      Alert.alert('⚠️ Permission Denied', 'Bluetooth & Location permissions are required.');
+      return;
+    }
 
-
-  // 1. Scan for Peripherals
-  const startScan = () => {
     setDevices([]);
-    manager.startDeviceScan(null, null, (error, device) => {
+    setIsScanning(true);
+
+    manager.startDeviceScan([SERVICE_UUID], null, (error, device) => {
       if (error) {
-        console.log('Scan error:', error);
+        setIsScanning(false);
+        Alert.alert('Scan Error', error.message);
         return;
       }
-      if (device && device.name) {
-        setDevices((prevDevices) => {
-          if (prevDevices.some((d) => d.id === device.id)) return prevDevices;
-          return [...prevDevices, device];
+      if (device) {
+        setDevices((prev) => {
+          if (prev.some((d) => d.id === device.id)) return prev;
+          return [...prev, device];
         });
       }
     });
+
+    setTimeout(() => {
+      manager.stopDeviceScan();
+      setIsScanning(false);
+    }, 10000);
   };
 
-  // 2. Connect to a Device
   const connectToDevice = async (device: Device) => {
     manager.stopDeviceScan();
+    setIsScanning(false);
+    setIsLoading(true);
     try {
       const connected = await manager.connectToDevice(device.id);
-      // Crucial Step: Discover services and characteristics before interacting
       const discovered = await connected.discoverAllServicesAndCharacteristics();
       setConnectedDevice(discovered);
-      console.log('Connected to:', discovered.name);
-    } catch (error) {
-      console.log('Connection failed:', error);
+      setStep(2);
+    } catch (error: any) {
+      Alert.alert('Connection Failed', error?.message || 'Please try again.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  // 3. READ Mode (Synchronous Pull)
-  const readCharacteristic = async () => {
+  // ──────────────────────────────────────────────────────
+  // Step 2 – Read Initial Value
+  // ──────────────────────────────────────────────────────
+  const readInitialValue = async () => {
     if (!connectedDevice) return;
+    setIsLoading(true);
     try {
-      const device_id:string = connectedDevice.id.toString();
       const characteristic = await manager.readCharacteristicForDevice(
-        device_id,
+        connectedDevice.id,
         SERVICE_UUID,
         CHAR_UUID
       );
-      // Decode Base64 string back to readable text/numbers
-      const rawData = Buffer.from(characteristic.value || '', 'base64').toString('ascii');
-      setReceivedData(`Read Value: ${rawData}`);
-      console.log('Read Value:', rawData);
-    } catch (error) {
-      console.log('Read failed:', error);
+      const raw = Buffer.from(characteristic.value || '', 'base64').toString('utf-8');
+      setInitialValue(raw);
+      setStep(3);
+    } catch (error: any) {
+      Alert.alert('Read Failed', error?.message || 'Failed to read data from device.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  // 4. WRITE Mode (Push Data)
-  const writeCharacteristic = async () => {
+  // ──────────────────────────────────────────────────────
+  // Step 3 – Send Names
+  // ──────────────────────────────────────────────────────
+  const sendNames = async () => {
     if (!connectedDevice) return;
-    if (!writeValue) {
-      Alert.alert('Input Error', 'Please enter a value to write.');
+    if (!myName.trim() || !buddyName.trim()) {
+      Alert.alert('⚠️ Missing Info', 'Please enter both your name and your buddy\'s name.');
       return;
-    } 
+    }
+    setIsLoading(true);
     try {
-      // Data MUST be converted to Base64
-      const base64Value = Buffer.from(writeValue, 'utf-8').toString('base64');
-      const device_id:string = connectedDevice.id.toString();
-
-      // Use writeCharacteristicWithResponseForDevice() for Write Request
-      // Use writeCharacteristicWithoutResponseForDevice() for Write Command
-      await manager.writeCharacteristicWithResponseForDevice( device_id, SERVICE_UUID,
-                                                              CHAR_UUID, base64Value);
-      Alert.alert('Write Success', `Value "${writeValue}" written successfully.`);
-      setWriteValue(''); // Clear input after successful write
-    } catch (error) {
-      console.log('Write failed:', error);
+      const payload = `${myName.trim()}, ${buddyName.trim()}`;
+      const base64Value = Buffer.from(payload, 'utf-8').toString('base64');
+      await manager.writeCharacteristicWithResponseForDevice(
+        connectedDevice.id,
+        SERVICE_UUID,
+        CHAR_UUID,
+        base64Value
+      );
+      setStep(4);
+    } catch (error: any) {
+      Alert.alert('Send Failed', error?.message || 'Failed to send data to device.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  // 5. NOTIFY / INDICATE Mode (Asynchronous Push Subscriptions)
-  const startNotificationStream = () => {
+  // ──────────────────────────────────────────────────────
+  // Step 4 – Read Grade Prediction
+  // ──────────────────────────────────────────────────────
+  const readGrade = async () => {
     if (!connectedDevice) return;
-
-    // monitorCharacteristicForDevice handles both Notifications and Indications
-    manager.monitorCharacteristicForDevice(connectedDevice.id, SERVICE_UUID, CHAR_UUID_NOTIFY,
-      (error, char) => {
-        if (error) {
-          console.log('Notification error:', error);
-          return;
-        }
-        if (char?.value) {
-          const rawData = Buffer.from(char.value, 'base64').toString('ascii');
-          setReceivedData(`Live Stream: ${rawData}`);
-        }
-      }
-    );
+    setIsLoading(true);
+    try {
+      const characteristic = await manager.readCharacteristicForDevice(
+        connectedDevice.id,
+        SERVICE_UUID,
+        CHAR_UUID
+      );
+      const raw = Buffer.from(characteristic.value || '', 'base64').toString('utf-8');
+      setGradeResult(raw);
+    } catch (error: any) {
+      Alert.alert('Read Failed', error?.message || 'Failed to read grade result.');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  // 6. Disconnect from Device
   const disconnectDevice = async () => {
-    if (!connectedDevice) return; 
-    await manager.cancelDeviceConnection(connectedDevice.id);
+    if (!connectedDevice) return;
+    try {
+      await manager.cancelDeviceConnection(connectedDevice.id);
+    } catch (_) {}
     setConnectedDevice(null);
-    Alert.alert('Disconnected', 'Device has been disconnected.');
+    setStep(1);
+    setDevices([]);
+    setInitialValue('');
+    setMyName('');
+    setBuddyName('');
+    setGradeResult('');
   };
 
-  return (  // Render the UI based on connection state
-    <View style={styles.container}>
-      {!connectedDevice ? ( // if no device is connected, show the scan list
-        <>
-          <Button title="Scan Devices" onPress={startScan} />
-          <FlatList
-            data={devices}
-            keyExtractor={(item) => item.id}
-            renderItem={({ item }) => (
-              <TouchableOpacity style={styles.deviceRow} onPress={() => connectToDevice(item)}>
-                {item.isConnectable?(<Text>{item.name} {item.id} - {item.rssi} dBm</Text>):(<Text>---</Text>)}
+  // ──────────────────────────────────────────────────────
+  // Stepper Progress Bar
+  // ──────────────────────────────────────────────────────
+  const StepperBar = () => (
+    <View style={styles.stepperContainer}>
+      {([1, 2, 3, 4] as Step[]).map((s, i) => (
+        <React.Fragment key={s}>
+          <View style={styles.stepperNode}>
+            <View style={[styles.stepperCircle, step >= s && styles.stepperCircleActive]}>
+              {step > s ? (
+                <Text style={styles.stepperCheck}>✓</Text>
+              ) : (
+                <Text style={[styles.stepperNum, step === s && styles.stepperNumActive]}>
+                  {s}
+                </Text>
+              )}
+            </View>
+            <Text style={[styles.stepperLabel, step === s && styles.stepperLabelActive]}>
+              {STEP_LABELS[s]}
+            </Text>
+          </View>
+          {i < 3 && (
+            <View style={[styles.stepperLine, step > s && styles.stepperLineActive]} />
+          )}
+        </React.Fragment>
+      ))}
+    </View>
+  );
+
+  return (
+    <View style={styles.root}>
+      {/* Background gradient blobs */}
+      <View style={styles.blob1} />
+      <View style={styles.blob2} />
+
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* ── Header ── */}
+        <View style={styles.header}>
+          <View style={styles.iconRing}>
+            <Text style={styles.iconEmoji}>🔮</Text>
+          </View>
+          <Text style={styles.appTitle}>BLE Grade Predictor</Text>
+          <Text style={styles.appSubtitle}>Bluetooth Smart Assessment System</Text>
+        </View>
+
+        {/* ── Stepper ── */}
+        <StepperBar />
+
+        {/* ═══════════════════════════════════════════
+            STEP 1 – Scan & Connect
+        ════════════════════════════════════════════ */}
+        <View style={[styles.card, step === 1 ? styles.cardActive : step > 1 ? styles.cardDone : styles.cardLocked]}>
+          <View style={styles.cardHeader}>
+            <View style={[styles.badge, step === 1 && styles.badgeActive, step > 1 && styles.badgeDone]}>
+              <Text style={styles.badgeText}>{step > 1 ? '✓' : '01'}</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.cardTitle}>Scan &amp; Connect Device</Text>
+              <Text style={styles.cardDesc}>Find your instructor's BLE device</Text>
+            </View>
+          </View>
+
+          {!connectedDevice ? (
+            <>
+              <TouchableOpacity
+                style={[styles.btn, isScanning && styles.btnScanning]}
+                onPress={startScan}
+                disabled={isScanning || isLoading}
+                activeOpacity={0.75}
+              >
+                {isScanning ? (
+                  <View style={styles.scanningRow}>
+                    <Animated.View style={[styles.scanDot, { transform: [{ scale: pulseAnim }] }]} />
+                    <Text style={styles.btnText}>Scanning for devices...</Text>
+                  </View>
+                ) : (
+                  <Text style={styles.btnText}>🔍  Scan Devices</Text>
+                )}
               </TouchableOpacity>
-            )}
-          />
-        </>
-      ) : (  // if a device is connected, show the dashboard
-        <View style={styles.dashboard}>
-          <Text style={styles.title}>Connected to: {connectedDevice.name}</Text>
-          <Text style={styles.dataBox}>{receivedData || "No data fetched yet"}</Text>
-          <Button title="Read Value" onPress={readCharacteristic} />          
-          <Text>Enter your name:</Text>
-          <TextInput style={styles.input} value={writeValue} onChangeText={setWriteValue} 
-                placeholder="Enter value to write" />  
-          <Button title="Write Value" onPress={writeCharacteristic} />
-          {/* Button Subscribed to Notifications is disabled. Enable it when needed */}
-          <Button disabled={true} title="Subscribe to Notifications" onPress={startNotificationStream} />
-          <Button title="Disconnect" onPress={disconnectDevice} />
+
+              {devices.length > 0 && (
+                <View style={styles.deviceList}>
+                  <Text style={styles.listLabel}>Found Devices</Text>
+                  {devices.map((device) => (
+                    <TouchableOpacity
+                      key={device.id}
+                      style={styles.deviceItem}
+                      onPress={() => connectToDevice(device)}
+                      activeOpacity={0.7}
+                    >
+                      <View style={styles.deviceIcon}>
+                        <Text style={{ fontSize: 16 }}>📡</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.deviceName}>{device.name || 'Unknown Device'}</Text>
+                        <Text style={styles.deviceId}>{device.id}</Text>
+                      </View>
+                      <Text style={styles.connectArrow}>›</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+
+              {isScanning && devices.length === 0 && (
+                <View style={styles.emptyHint}>
+                  <Text style={styles.emptyHintText}>Looking for nearby BLE devices…</Text>
+                </View>
+              )}
+            </>
+          ) : (
+            <View style={styles.connectedCard}>
+              <View style={styles.connectedLeft}>
+                <View style={styles.connectedDot} />
+                <View>
+                  <Text style={styles.connectedTitle}>Connected</Text>
+                  <Text style={styles.connectedName}>{connectedDevice.name || connectedDevice.id}</Text>
+                </View>
+              </View>
+              <TouchableOpacity style={styles.disconnectBtn} onPress={disconnectDevice}>
+                <Text style={styles.disconnectText}>Disconnect</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+
+        {/* ═══════════════════════════════════════════
+            STEP 2 – Read Initial Value
+        ════════════════════════════════════════════ */}
+        <View style={[styles.card, step === 2 ? styles.cardActive : step > 2 ? styles.cardDone : styles.cardLocked]}>
+          <View style={styles.cardHeader}>
+            <View style={[styles.badge, step === 2 && styles.badgeActive, step > 2 && styles.badgeDone]}>
+              <Text style={styles.badgeText}>{step > 2 ? '✓' : '02'}</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.cardTitle}>Read Initial Data</Text>
+              <Text style={styles.cardDesc}>Fetch the first value from the device</Text>
+            </View>
+          </View>
+
+          <TouchableOpacity
+            style={[styles.btn, step !== 2 && styles.btnDisabled]}
+            onPress={readInitialValue}
+            disabled={step !== 2 || isLoading}
+            activeOpacity={0.75}
+          >
+            <Text style={styles.btnText}>📥  Read Data</Text>
+          </TouchableOpacity>
+
+          {initialValue !== '' && (
+            <View style={styles.dataBox}>
+              <Text style={styles.dataBoxLabel}>DEVICE RESPONSE</Text>
+              <Text style={styles.dataBoxValue}>{initialValue}</Text>
+            </View>
+          )}
+        </View>
+
+        {/* ═══════════════════════════════════════════
+            STEP 3 – Send Names
+        ════════════════════════════════════════════ */}
+        <View style={[styles.card, step === 3 ? styles.cardActive : step > 3 ? styles.cardDone : styles.cardLocked]}>
+          <View style={styles.cardHeader}>
+            <View style={[styles.badge, step === 3 && styles.badgeActive, step > 3 && styles.badgeDone]}>
+              <Text style={styles.badgeText}>{step > 3 ? '✓' : '03'}</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.cardTitle}>Send Student Names</Text>
+              <Text style={styles.cardDesc}>Enter your name &amp; your buddy's name</Text>
+            </View>
+          </View>
+
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>Your Name</Text>
+            <TextInput
+              style={[styles.input, step !== 3 && styles.inputDisabled]}
+              placeholder="e.g. Somchai"
+              placeholderTextColor="#4B4570"
+              value={myName}
+              onChangeText={setMyName}
+              editable={step === 3}
+            />
+          </View>
+
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>Buddy's Name</Text>
+            <TextInput
+              style={[styles.input, step !== 3 && styles.inputDisabled]}
+              placeholder="e.g. Malee"
+              placeholderTextColor="#4B4570"
+              value={buddyName}
+              onChangeText={setBuddyName}
+              editable={step === 3}
+            />
+          </View>
+
+          <TouchableOpacity
+            style={[styles.btnPrimary, step !== 3 && styles.btnDisabled]}
+            onPress={sendNames}
+            disabled={step !== 3 || isLoading}
+            activeOpacity={0.75}
+          >
+            <Text style={styles.btnPrimaryText}>📤  Send Names to Device</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* ═══════════════════════════════════════════
+            STEP 4 – Read Grade
+        ════════════════════════════════════════════ */}
+        <View style={[styles.card, step === 4 ? styles.cardActive : styles.cardLocked]}>
+          <View style={styles.cardHeader}>
+            <View style={[styles.badge, step === 4 && styles.badgeAccent]}>
+              <Text style={styles.badgeText}>04</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.cardTitle}>Grade Prediction</Text>
+              <Text style={styles.cardDesc}>Read the AI-predicted grade from device</Text>
+            </View>
+          </View>
+
+          <TouchableOpacity
+            style={[styles.btnAccent, step !== 4 && styles.btnDisabled]}
+            onPress={readGrade}
+            disabled={step !== 4 || isLoading}
+            activeOpacity={0.75}
+          >
+            <Text style={styles.btnAccentText}>🎯  Reveal My Grade</Text>
+          </TouchableOpacity>
+
+          {gradeResult !== '' && (
+            <View style={styles.gradeCard}>
+              <Text style={styles.gradeCardLabel}>✨  PREDICTED GRADE  ✨</Text>
+              <Animated.Text
+                style={[
+                  styles.gradeValue,
+                  {
+                    opacity: glowAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0.8, 1],
+                    }),
+                  },
+                ]}
+              >
+                {gradeResult}
+              </Animated.Text>
+              <View style={styles.gradeGlow} />
+            </View>
+          )}
+        </View>
+
+        {/* bottom spacer */}
+        <View style={{ height: 40 }} />
+      </ScrollView>
+
+      {/* ── Loading Overlay ── */}
+      {isLoading && (
+        <View style={styles.overlay}>
+          <View style={styles.overlayCard}>
+            <ActivityIndicator size="large" color="#A855F7" />
+            <Text style={styles.overlayText}>Processing…</Text>
+          </View>
         </View>
       )}
     </View>
   );
 }
 
-//Styles for the UI components
-const styles = StyleSheet.create({
-  container: { flex: 1, paddingTop: 25, paddingHorizontal: 20, backgroundColor: '#fff' },
-  deviceRow: { padding: 15, marginVertical: 5, backgroundColor: '#f0f0f0', borderRadius: 5 },
-  dashboard: { gap: 10 },
-  title: { fontSize: 18, fontWeight: 'bold' },
-  dataBox: { padding: 10, backgroundColor: '#eef', marginVertical: 10, textAlign: 'center' },
-  input: { padding: 10, borderColor: '#aaf', color: '#000', borderWidth: 1, marginVertical: 10, borderRadius: 5 }
-});
+// ─────────────────────────────────────────────────────────
+// STYLES
+// ─────────────────────────────────────────────────────────
+const PURPLE = '#8B5CF6';
+const PURPLE_LIGHT = '#A855F7';
+const PURPLE_DARK = '#6D28D9';
+const BG = '#080612';
+const CARD_BG = '#10091F';
+const CARD_BORDER = '#1E1535';
 
+const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+    backgroundColor: BG,
+  },
+  blob1: {
+    position: 'absolute',
+    top: -120,
+    right: -80,
+    width: 320,
+    height: 320,
+    borderRadius: 160,
+    backgroundColor: 'rgba(109,40,217,0.18)',
+  },
+  blob2: {
+    position: 'absolute',
+    bottom: 80,
+    left: -100,
+    width: 280,
+    height: 280,
+    borderRadius: 140,
+    backgroundColor: 'rgba(168,85,247,0.10)',
+  },
+  scroll: { flex: 1 },
+  scrollContent: {
+    paddingHorizontal: 20,
+    paddingTop: 56,
+    paddingBottom: 20,
+  },
+
+  // ── Header ──
+  header: {
+    alignItems: 'center',
+    marginBottom: 32,
+  },
+  iconRing: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    borderWidth: 1.5,
+    borderColor: PURPLE,
+    backgroundColor: '#1A0F35',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 14,
+    shadowColor: PURPLE,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6,
+    shadowRadius: 20,
+    elevation: 8,
+  },
+  iconEmoji: { fontSize: 32 },
+  appTitle: {
+    fontSize: 28,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    letterSpacing: 0.4,
+    textAlign: 'center',
+  },
+  appSubtitle: {
+    marginTop: 6,
+    fontSize: 13,
+    color: '#9F7AEA',
+    letterSpacing: 0.6,
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+
+  // ── Stepper ──
+  stepperContainer: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+    marginBottom: 28,
+    paddingHorizontal: 4,
+  },
+  stepperNode: {
+    alignItems: 'center',
+    width: 68,
+  },
+  stepperCircle: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 2,
+    borderColor: '#2A1F4A',
+    backgroundColor: '#100B22',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  stepperCircleActive: {
+    borderColor: PURPLE,
+    backgroundColor: PURPLE,
+    shadowColor: PURPLE,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.7,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  stepperNum: { fontSize: 12, color: '#4B4570', fontWeight: '700' },
+  stepperNumActive: { color: '#FFFFFF' },
+  stepperCheck: { fontSize: 13, color: '#FFFFFF', fontWeight: '900' },
+  stepperLabel: {
+    marginTop: 5,
+    fontSize: 9,
+    color: '#4B4570',
+    fontWeight: '600',
+    textAlign: 'center',
+    letterSpacing: 0.3,
+  },
+  stepperLabelActive: { color: '#C084FC' },
+  stepperLine: {
+    flex: 1,
+    height: 2,
+    backgroundColor: '#1E1535',
+    marginTop: 14,
+    marginHorizontal: 2,
+  },
+  stepperLineActive: { backgroundColor: PURPLE },
+
+  // ── Cards ──
+  card: {
+    backgroundColor: CARD_BG,
+    borderRadius: 20,
+    padding: 20,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+  },
+  cardActive: {
+    borderColor: PURPLE,
+    borderWidth: 1.5,
+    shadowColor: PURPLE,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+    elevation: 6,
+  },
+  cardDone: {
+    borderColor: '#2A1F4A',
+    opacity: 0.7,
+  },
+  cardLocked: {
+    opacity: 0.35,
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    marginBottom: 18,
+  },
+  badge: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#1A1030',
+    borderWidth: 1,
+    borderColor: '#2A1F4A',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  badgeActive: {
+    backgroundColor: PURPLE_DARK,
+    borderColor: PURPLE,
+    shadowColor: PURPLE,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  badgeDone: {
+    backgroundColor: '#4C1D95',
+    borderColor: '#7C3AED',
+  },
+  badgeAccent: {
+    backgroundColor: PURPLE_LIGHT,
+    borderColor: '#DDD6FE',
+  },
+  badgeText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  cardTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#F5F3FF',
+    letterSpacing: 0.2,
+  },
+  cardDesc: {
+    fontSize: 12,
+    color: '#7C6FA0',
+    marginTop: 2,
+    fontWeight: '400',
+  },
+
+  // ── Buttons ──
+  btn: {
+    backgroundColor: '#1A1030',
+    paddingVertical: 14,
+    borderRadius: 14,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#3B2D6A',
+    marginBottom: 4,
+  },
+  btnScanning: {
+    borderColor: PURPLE,
+    backgroundColor: '#1D1240',
+  },
+  btnDisabled: {
+    opacity: 0.4,
+  },
+  btnText: {
+    color: '#DDD6FE',
+    fontWeight: '700',
+    fontSize: 14,
+    letterSpacing: 0.4,
+  },
+  btnPrimary: {
+    backgroundColor: PURPLE_DARK,
+    paddingVertical: 15,
+    borderRadius: 14,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: PURPLE,
+    shadowColor: PURPLE,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
+    elevation: 5,
+  },
+  btnPrimaryText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 15,
+    letterSpacing: 0.5,
+  },
+  btnAccent: {
+    backgroundColor: PURPLE_LIGHT,
+    paddingVertical: 16,
+    borderRadius: 14,
+    alignItems: 'center',
+    shadowColor: PURPLE_LIGHT,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.55,
+    shadowRadius: 14,
+    elevation: 8,
+  },
+  btnAccentText: {
+    color: '#FFFFFF',
+    fontWeight: '900',
+    fontSize: 16,
+    letterSpacing: 0.6,
+  },
+
+  // ── Scanning row ──
+  scanningRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  scanDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: PURPLE_LIGHT,
+    shadowColor: PURPLE_LIGHT,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.8,
+    shadowRadius: 6,
+  },
+
+  // ── Device list ──
+  deviceList: { marginTop: 14 },
+  listLabel: {
+    fontSize: 11,
+    color: '#7C6FA0',
+    fontWeight: '700',
+    letterSpacing: 1,
+    marginBottom: 8,
+    textTransform: 'uppercase',
+  },
+  deviceItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#14092A',
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#3B2D6A',
+    gap: 12,
+  },
+  deviceIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#1E1040',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  deviceName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#EDE9FE',
+  },
+  deviceId: {
+    fontSize: 10,
+    color: '#6D5FA0',
+    marginTop: 2,
+  },
+  connectArrow: {
+    fontSize: 22,
+    color: PURPLE_LIGHT,
+    fontWeight: '300',
+  },
+  emptyHint: {
+    marginTop: 12,
+    alignItems: 'center',
+  },
+  emptyHintText: {
+    color: '#4B4570',
+    fontSize: 13,
+    fontStyle: 'italic',
+  },
+
+  // ── Connected ──
+  connectedCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#14092A',
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: PURPLE,
+  },
+  connectedLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  connectedDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#34D399',
+    shadowColor: '#34D399',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.8,
+    shadowRadius: 5,
+  },
+  connectedTitle: {
+    fontSize: 11,
+    color: '#34D399',
+    fontWeight: '700',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
+  connectedName: {
+    fontSize: 13,
+    color: '#DDD6FE',
+    fontWeight: '600',
+    marginTop: 1,
+  },
+  disconnectBtn: {
+    backgroundColor: '#3D0C1C',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#BE185D',
+  },
+  disconnectText: {
+    color: '#FBCFE8',
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+  },
+
+  // ── Data Box ──
+  dataBox: {
+    marginTop: 14,
+    backgroundColor: '#12082A',
+    borderRadius: 14,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#4C1D95',
+    alignItems: 'center',
+  },
+  dataBoxLabel: {
+    fontSize: 10,
+    color: '#9F7AEA',
+    fontWeight: '700',
+    letterSpacing: 1.5,
+    marginBottom: 6,
+    textTransform: 'uppercase',
+  },
+  dataBoxValue: {
+    fontSize: 18,
+    color: '#EDE9FE',
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+
+  // ── Inputs ──
+  inputGroup: { marginBottom: 12 },
+  inputLabel: {
+    fontSize: 11,
+    color: '#7C6FA0',
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    marginBottom: 6,
+    textTransform: 'uppercase',
+  },
+  input: {
+    backgroundColor: '#0D0720',
+    borderWidth: 1,
+    borderColor: '#2A1F4A',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 13,
+    fontSize: 15,
+    color: '#F5F3FF',
+    fontWeight: '500',
+  },
+  inputDisabled: {
+    opacity: 0.5,
+  },
+
+  // ── Grade card ──
+  gradeCard: {
+    marginTop: 18,
+    backgroundColor: '#0F062B',
+    borderRadius: 20,
+    paddingVertical: 30,
+    paddingHorizontal: 20,
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: PURPLE_LIGHT,
+    shadowColor: PURPLE_LIGHT,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 24,
+    elevation: 10,
+    overflow: 'hidden',
+  },
+  gradeCardLabel: {
+    fontSize: 11,
+    color: '#C084FC',
+    fontWeight: '800',
+    letterSpacing: 2,
+    marginBottom: 14,
+    textTransform: 'uppercase',
+  },
+  gradeValue: {
+    fontSize: 80,
+    fontWeight: '900',
+    color: '#E9D5FF',
+    textShadowColor: 'rgba(168,85,247,0.8)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 20,
+    lineHeight: 90,
+  },
+  gradeGlow: {
+    position: 'absolute',
+    bottom: -40,
+    width: 200,
+    height: 100,
+    borderRadius: 100,
+    backgroundColor: 'rgba(168,85,247,0.15)',
+  },
+
+  // ── Overlay ──
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(8,6,18,0.88)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 999,
+  },
+  overlayCard: {
+    backgroundColor: '#12082A',
+    borderRadius: 20,
+    padding: 32,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: PURPLE,
+    shadowColor: PURPLE,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.4,
+    shadowRadius: 20,
+    elevation: 10,
+  },
+  overlayText: {
+    marginTop: 14,
+    fontSize: 14,
+    color: '#C084FC',
+    fontWeight: '700',
+    letterSpacing: 1.5,
+  },
+});
